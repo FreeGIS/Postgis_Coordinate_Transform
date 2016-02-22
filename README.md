@@ -13,3 +13,7 @@ select LayerTransform(
   transformtype：加/纠偏方式，支持以下6种'BD2GCJ', 'GCJ2BD', 'WGS2GCJ','GCJ2WGS','BD2WGS','WGS2BD'，分别代表 百度转谷歌高德，谷歌高德转百度，84转火星，火星转84，百度转84,84转百度。
 ## 效果图
   
+转换前：底图是osm，非偏移的84墨卡托投影，'road'是火星坐标的墨卡托投影。
+	![这里写图片描述](http://img.blog.csdn.net/20151203104302079)
+	转换后：
+	![这里写图片描述](http://img.blog.csdn.net/20151203104452730)
