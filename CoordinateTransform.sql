@@ -5,7 +5,7 @@ CREATE OR REPLACE FUNCTION BD2GCJ(
 	in bd_lat double precision,
 	out lon double precision,
 	out lat double precision
-)  As
+) RETURNS SETOF record As
 $BODY$
 DECLARE
 	x double precision;
@@ -20,6 +20,8 @@ BEGIN
     theta:= atan2(y, x) - 0.000003 * cos(x * x_pi);
     lon:= z *cos(theta);
     lat:= z *sin(theta);
+	return next;
+	return;
 END;
 $BODY$
 LANGUAGE 'plpgsql' VOLATILE STRICT;
@@ -32,7 +34,7 @@ CREATE OR REPLACE FUNCTION GCJ2BD(
 	in gj_lat double precision,
 	out lon double precision,
 	out lat double precision
-)  As
+) RETURNS SETOF record As
 $BODY$
 DECLARE
 	z double precision;
@@ -43,6 +45,8 @@ BEGIN
     theta:= atan2(gj_lat, gj_lon) + 0.000003 * cos(gj_lon * x_pi);
     lon:= z * cos(theta) + 0.0065;
     lat:= z * sin(theta) + 0.006;
+	return next;
+	return;
 END;
 $BODY$
 LANGUAGE 'plpgsql' VOLATILE STRICT;
@@ -56,7 +60,7 @@ CREATE OR REPLACE FUNCTION WGS2GCJ(
 	in wgs_lat double precision,
 	out lon double precision,
 	out lat double precision
-) As
+) RETURNS SETOF record As
 $BODY$
 DECLARE
     a double precision:= 6378245.0;
@@ -73,6 +77,7 @@ BEGIN
 	if(wgs_lon < 72.004 or wgs_lon > 137.8347 or wgs_lat < 0.8293 or wgs_lat > 55.8271) then
         lon:= wgs_lon;
 		lat:= wgs_lat;
+		return next;
 		return;
 	end if;
 	--国内坐标
@@ -96,6 +101,8 @@ BEGIN
 
     lon:= wgs_lon + dLon;
     lat:= wgs_lat + dLat;
+	return next;
+	return;
 END;
 $BODY$
 LANGUAGE 'plpgsql' VOLATILE STRICT;
@@ -108,7 +115,7 @@ CREATE OR REPLACE FUNCTION GCJ2WGS(
 	in gcj_lat double precision,
 	out lon double precision,
 	out lat double precision
-) As
+) RETURNS SETOF record As
 $BODY$
 DECLARE
 	rec record;
@@ -120,6 +127,8 @@ BEGIN
     d_lat:= rec.lat - gcj_lat;
     lon:= gcj_lon - d_lon;
     lat:= gcj_lat - d_lat;
+    return next;
+	return;
 END;
 $BODY$
 LANGUAGE 'plpgsql' VOLATILE STRICT;
@@ -132,7 +141,7 @@ CREATE OR REPLACE FUNCTION BD2WGS(
 	in bd_lat double precision,
 	out lon double precision,
 	out lat double precision
-) As
+) RETURNS SETOF record As
 $BODY$
 DECLARE
 	rec record;
@@ -145,6 +154,8 @@ BEGIN
 	select * from GCJ2WGS(rec.lon, rec.lat) into rec;  
 	lon:=rec.lon;
 	lat:=rec.lat;
+    return next;
+	return;
 END;
 $BODY$
 LANGUAGE 'plpgsql' VOLATILE STRICT;
@@ -155,7 +166,7 @@ CREATE OR REPLACE FUNCTION WGS2BD(
 	in wgs_lat double precision,
 	out lon double precision,
 	out lat double precision
-) As
+) RETURNS SETOF record As
 $BODY$
 DECLARE
 	rec record;
@@ -168,6 +179,8 @@ BEGIN
 	select * from GCJ2BD(rec.lon, rec.lat) into rec;  
 	lon:=rec.lon;
 	lat:=rec.lat;
+    return next;
+	return;
 END;
 $BODY$
 LANGUAGE 'plpgsql' VOLATILE STRICT;
