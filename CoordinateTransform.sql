@@ -258,7 +258,7 @@ BEGIN
 						beforepath2:=0;
 					elsif(geomrec.path[2]!=beforepath2) then
 						constructor:=rtrim(constructor, ',');
-						constructor:=constructor||')(';
+						constructor:=constructor||')(';--存在bug
 						beforepath2:=geomrec.path[2];
 					end if;
 					constructor:=constructor||pointrec.lon::text||' '||pointrec.lat::text||',';	
@@ -268,16 +268,18 @@ BEGIN
 			end case;		
 		end loop;	
 		constructor:=rtrim(constructor, ',');--最后的，要截取掉。
-		
 		case geometry_type
 			when 'POINT','MULTIPOINT','LINESTRING' then
 				constructor:=geometry_type||'('||constructor||')';
 			when 'MULTILINESTRING','POLYGON' then
 				constructor:=ltrim(constructor, ')');
 				constructor:=geometry_type||'('||constructor||'))';
+				constructor:=replace(constructor, ')(', '),(');
 			when 'MULTIPOLYGON' then
 				constructor:=ltrim(constructor, '))');
 				constructor:=geometry_type||'('||constructor||')))';
+				constructor:=replace(constructor, ')(', '),(');
+				constructor:=replace(constructor, '))((', ')),((');
 			else
 				raise notice '当前表非空间数据表！';
 				return;
