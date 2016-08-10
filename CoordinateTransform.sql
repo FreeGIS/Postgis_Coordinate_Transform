@@ -413,7 +413,6 @@ BEGIN
 				raise notice '当前表非空间数据表！';
 				return;
 		end case;
-		raise notice '%',constructor;
 		if(current_srid!=4326) then
 			if(transformtype!='WGS2BD' and transformtype!='GCJ2BD') then 
 				tempgeom:=ST_Transform(st_geomfromtext(constructor,4326),current_srid);
