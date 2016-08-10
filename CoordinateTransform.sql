@@ -380,10 +380,11 @@ BEGIN
 					constructor:=constructor||pointrec.lon::text||' '||pointrec.lat::text||',';	
 				when 'MULTIPOLYGON' then
 					if(geomrec.path[1]!=beforepath) then--转换多个了
+						constructor:=rtrim(constructor, ',');
 						constructor:=constructor||'))((';
 						beforepath:=geomrec.path[1];
 						beforepath2:=0;
-					elsif(geomrec.path[2]!=beforepath2) then
+					elsif(beforepath2!=0 and geomrec.path[2]!=beforepath2) then
 						constructor:=rtrim(constructor, ',');
 						constructor:=constructor||')(';
 						beforepath2:=geomrec.path[2];
@@ -394,6 +395,7 @@ BEGIN
 					return;
 			end case;		
 		end loop;	
+		
 		constructor:=rtrim(constructor, ',');--最后的，要截取掉。
 		case geometry_type
 			when 'POINT','MULTIPOINT','LINESTRING' then
@@ -411,6 +413,7 @@ BEGIN
 				raise notice '当前表非空间数据表！';
 				return;
 		end case;
+		raise notice '%',constructor;
 		if(current_srid!=4326) then
 			if(transformtype!='WGS2BD' and transformtype!='GCJ2BD') then 
 				tempgeom:=ST_Transform(st_geomfromtext(constructor,4326),current_srid);
