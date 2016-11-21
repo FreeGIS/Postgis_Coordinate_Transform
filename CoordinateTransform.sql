@@ -318,8 +318,9 @@ BEGIN
 	end if;
 	
 	for rec in execute 'select gid,'||geom_name||' as geom from '||inputlayer loop
-		if(ST_IsEmpty(rec.geom)) --如果图形是空，部分用户的数据存在异常，在此判断
+		if(ST_IsEmpty(rec.geom))  then--如果图形是空，部分用户的数据存在异常，在此判断
 			continue;
+		end if;
 		constructor:=''; 
 		beforepath:=0;
 		beforepath2:=0;
