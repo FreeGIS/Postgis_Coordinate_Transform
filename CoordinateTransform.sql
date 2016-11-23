@@ -297,6 +297,7 @@ CREATE OR REPLACE FUNCTION LayerTransform(
 $BODY$
 DECLARE
 	rec record;
+	primarykey text;--主键字段
 	current_srid int;
 	geometry_type text;
 	geom_name text;
@@ -308,6 +309,11 @@ DECLARE
 	beforepath2 int;
 	k int:=0;
 BEGIN
+	execute 'select pg_attribute.attname as colname from pg_constraint  
+inner join pg_class on pg_constraint.conrelid = pg_class.oid 
+inner join pg_attribute on pg_attribute.attrelid = pg_class.oid  and  pg_attribute.attnum = pg_constraint.conkey[1]
+inner join pg_type on pg_type.oid = pg_attribute.atttypid
+where pg_class.relname = $1' using inputlayer into primarykey;
 	execute 'select * from geometry_columns where f_table_name=$1' using inputlayer into rec;
 	current_srid:=rec.srid;
 	geometry_type:=rec.type;
@@ -317,8 +323,8 @@ BEGIN
 		return;
 	end if;
 	
-	for rec in execute 'select gid,'||geom_name||' as geom from '||inputlayer loop
-		if(ST_IsEmpty(rec.geom))  then--如果图形是空，部分用户的数据存在异常，在此判断
+	for rec in execute format('select %I as gid,%I as geom from %I',primarykey,geom_name,inputlayer) loop
+		if(ST_IsEmpty(rec.geom)) then --如果图形是空，部分用户的数据存在异常，在此判断
 			continue;
 		end if;
 		constructor:=''; 
@@ -425,7 +431,7 @@ BEGIN
 		else
 			tempgeom:=st_geomfromtext(constructor,4326);
 		end if;
-		execute 'update '||inputlayer||' set '||geom_name||'=$1 where gid=$2' using tempgeom,rec.gid;
+		execute format('update %I set %I=$1 where %I=$2',inputlayer,geom_name,primarykey) using tempgeom,rec.gid;
 		k:=k+1;
 		if(k%100=0) then
 			raise notice '已成功转换数量 %',k;
