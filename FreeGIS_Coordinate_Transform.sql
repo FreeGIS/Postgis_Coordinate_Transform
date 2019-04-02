@@ -167,7 +167,7 @@ LANGUAGE 'plpgsql' VOLATILE STRICT;
 
 
 --百度经纬转百度墨卡托
-CREATE OR REPLACE FUNCTION FreeGIS_BD_WGS2MKT(
+CREATE OR REPLACE FUNCTION FreeGIS_BDWGS2BDMKT(
 	in bd_point_4326 geometry(Point,4326),
 	out bd_point_3857 geometry(Point,3857)
 ) RETURNS geometry As $BODY$
@@ -230,7 +230,7 @@ $BODY$
 LANGUAGE 'plpgsql' VOLATILE STRICT;
 
 --百度墨卡托转百度经纬度
-CREATE OR REPLACE FUNCTION FreeGIS_BD_MKT2WGS(
+CREATE OR REPLACE FUNCTION FreeGIS_BDMKT2BDWGS(
 	in bd_point_3857 geometry(Point,3857),
 	out bd_point_4326 geometry(Point,4326)
 ) RETURNS geometry As $BODY$
@@ -267,8 +267,45 @@ END;
 $BODY$
 LANGUAGE 'plpgsql' VOLATILE STRICT;
 
+--WGS转百度墨卡托
+CREATE OR REPLACE FUNCTION FreeGIS_WGS2BDMKT(
+	in wgs_point geometry(Point,4326),
+	out bd_point_3857 geometry(Point,3857)
+) RETURNS geometry As $BODY$
+DECLARE
+	bd_point_4326 geometry(Point,4326);
+	
+BEGIN
+	--wgs转百度
+	bd_point_4326:=FreeGIS_WGS2BD(wgs_point);
+	bd_point_3857:=FreeGIS_BDWGS2BDMKT(bd_point_4326);
+	return;
+END;
+$BODY$
+LANGUAGE 'plpgsql' VOLATILE STRICT;
 
-CREATE TYPE FreeGIS_coordinate_transform_type AS ENUM ('BD2GCJ', 'GCJ2BD', 'WGS2GCJ','GCJ2WGS','BD2WGS','WGS2BD','BD_WGS2MKT','BD_MKT2WGS');
+--百度墨卡托转WGS
+CREATE OR REPLACE FUNCTION FreeGIS_BDMKT2WGS(
+	in bd_point_3857 geometry(Point,3857),
+	out wgs_point geometry(Point,4326)
+) RETURNS geometry As $BODY$
+DECLARE
+	bd_point_4326 geometry(Point,4326);
+	
+BEGIN
+	--百度墨卡托转百度经纬
+	bd_point_4326:=FreeGIS_BDMKT2BDWGS(bd_point_3857);
+	--百度经纬转 wgs经纬
+	wgs_point:=FreeGIS_BD2WGS(bd_point_4326);
+	return;
+END;
+$BODY$
+LANGUAGE 'plpgsql' VOLATILE STRICT;
+
+
+drop TYPE if exists FreeGIS_coordinate_transform_type cascade;
+CREATE TYPE FreeGIS_coordinate_transform_type AS ENUM ('BD2GCJ', 'GCJ2BD', 'WGS2GCJ','GCJ2WGS','BD2WGS','WGS2BD',
+'BDWGS2BDMKT','BDMKT2BDWGS','WGS2BDMKT','BDMKT2WGS');
 
 
 
@@ -307,13 +344,21 @@ BEGIN
 		return;
 	end if;
 	
-	--检查图形坐标系，当前只支持4326坐标系
-	if(rec.srid!=4326) then
-		raise notice '当前转换只支持数据源为WGS84(EPSG:4326)坐标系！';
-		raise notice '其他坐标系建议先自行转换到4326坐标系，然后使用该脚本进行批量坐标纠正！';
-		return;
+	--检查图形坐标系，当前只支持4326坐标系（除将百度墨卡托转百度经纬度除外）
+	if(transform_type!='BDMKT2BDWGS' and transform_type!='BDMKT2WGS') then
+		if(rec.srid!=4326) then
+			raise notice '当前转换只支持数据源为WGS84(EPSG:4326)坐标系！';
+			raise notice '其他坐标系建议先自行转换到4326坐标系，然后使用该脚本进行批量坐标纠正！';
+			return;
+		end if;
+	else
+		--百度墨卡托转其他坐标系，转换方式为BD_MKT2WGS，数据源坐标系应当为3857
+		if(rec.srid!=3857) then
+			raise notice '百度墨卡托转其他坐标系，数据源坐标系必须为(EPSG:3857)坐标系！';
+			return;
+		end if;
 	end if;
-	
+
 	geom_type:=rec.type;
 	geom_name:=rec.f_geometry_column;
 	
@@ -325,74 +370,87 @@ BEGIN
 		return;
 	end if;
 	
-	--检查坐标系转换类型合法性
-	case transform_type
-		when 'BD2GCJ' then 
-			transform_function_name:='FreeGIS_BD2GCJ';
-		when 'GCJ2BD' then 
-			transform_function_name:='FreeGIS_GCJ2BD';
-		when 'WGS2GCJ' then 
-			transform_function_name:='FreeGIS_WGS2GCJ';
-		when 'GCJ2WGS' then 
-			transform_function_name:='FreeGIS_GCJ2WGS';
-		when 'BD2WGS' then 
-			transform_function_name:='FreeGIS_BD2WGS';	
-		when 'WGS2BD' then 
-			transform_function_name:='FreeGIS_WGS2BD';
-		else
-			raise notice '坐标系转换类型输入不合法！';
-			return;
-	end case;
+	--转换函数名称拼接
+	transform_function_name:='FreeGIS_'||transform_type;
+	
 	
 	--图形拆分成点，点图形 进行坐标 偏移转换。
-	--创建临时表
-	create temp table _split_result(
-		rec_ctid tid,
-		geom_path integer[],
-		geom geometry(Point,4326)
-	) on commit drop;
+	--转换表新建转换结果字段，对原图形字段拆分，创建临时表存储拆分结果
+	if(transform_type='BDWGS2BDMKT' or transform_type='WGS2BDMKT') then
+		--新增转换结果字段
+		execute format('alter table %I.%I drop column if exists transform_geom',schema_name,table_name);
+		execute format('alter table %I.%I add column transform_geom geometry(%s,3857)',schema_name,table_name,geom_type);
+		create temp table _split_result(
+			rec_ctid tid,
+			geom_path integer[],
+			source_geom geometry(Point,4326),
+			target_geom geometry(Point,3857)
+		) on commit drop;
+	elsif(transform_type='BDMKT2BDWGS' or transform_type='BDMKT2WGS') then
+		--新增转换结果字段
+		execute format('alter table %I.%I drop column if exists transform_geom',schema_name,table_name);
+		execute format('alter table %I.%I add column transform_geom geometry(%s,4326)',schema_name,table_name,geom_type);
+		create temp table _split_result(
+			rec_ctid tid,
+			geom_path integer[],
+			source_geom geometry(Point,3857),
+			target_geom geometry(Point,4326)
+		) on commit drop;
+	else
+		--新增转换结果字段
+		execute format('alter table %I.%I drop column if exists transform_geom',schema_name,table_name);
+		execute format('alter table %I.%I add column transform_geom geometry(%s,4326)',schema_name,table_name,geom_type);
+		--新建拆分结果表
+		create temp table _split_result(
+			rec_ctid tid,
+			geom_path integer[],
+			source_geom geometry(Point,4326),
+			target_geom geometry(Point,4326)
+		) on commit drop;
+	end if;
+	
 	--图形字段非空，将其拆分成点，存入临时表
-	execute format('insert into _split_result SELECT ctid,(pt).path,(pt).geom 
+	execute format('insert into _split_result(rec_ctid,geom_path,source_geom) SELECT ctid,(pt).path,(pt).geom 
 	FROM (SELECT ctid, ST_DumpPoints(%I) AS pt FROM %I.%I where ST_IsEmpty(%I)=false) as dump_points',geom_name,schema_name,table_name,geom_name);
 	
 	
 	--临时表建立索引
 	create index _split_result_ctid_idx on _split_result using btree(rec_ctid);
-	--批量转换
-	execute format('update _split_result set geom=%s(geom)',transform_function_name);
+	--批量转换，从souce源转到target记录
+	execute format('update _split_result set target_geom=%s(source_geom)',transform_function_name);
 	
 	--转换完成后，拼装还原更改原表
 	case geom_type
 		when 'POINT' then
-			execute format('update %I.%I t1 set %I=t2.geom from _split_result t2 where t1.ctid=t2.rec_ctid',
-			schema_name,table_name,geom_name);
+			execute format('update %I.%I t1 set transform_geom=t2.target_geom from _split_result t2 where t1.ctid=t2.rec_ctid',
+			schema_name,table_name);
 		when 'MULTIPOINT' then
-			execute format('with _result as (select rec_ctid,ST_Multi(ST_Union(geom)) as geom from _split_result group by rec_ctid) 
-			update %I.%I t1 set %I=t2.geom from _result t2 where t1.ctid=t2.rec_ctid',
-			schema_name,table_name,geom_name);
+			execute format('with _result as (select rec_ctid,ST_Multi(ST_Union(target_geom)) as geom from _split_result group by rec_ctid) 
+			update %I.%I t1 set transform_geom=t2.geom from _result t2 where t1.ctid=t2.rec_ctid',
+			schema_name,table_name);
 		when 'LINESTRING' then
-			execute format('with _result as (select rec_ctid,ST_MakeLine(geom) from  _split_result group by rec_ctid) 
-			update %I.%I t1 set %I=t2.geom from _result t2 where t1.ctid=t2.rec_ctid',
-			schema_name,table_name,geom_name);
+			execute format('with _result as (select rec_ctid,ST_MakeLine(target_geom) as geom from _split_result group by rec_ctid) 
+			update %I.%I t1 set transform_geom=t2.geom from _result t2 where t1.ctid=t2.rec_ctid',
+			schema_name,table_name);
 		when 'MULTILINESTRING' then
 			execute format('with _result as (select t.rec_ctid,ST_Multi(ST_Union(t.geom)) as geom from 
-			(select rec_ctid,geom_path[1],ST_MakeLine(geom) as geom from  _split_result group by rec_ctid,geom_path[1]) t 
+			(select rec_ctid,geom_path[1],ST_MakeLine(target_geom) as geom from  _split_result group by rec_ctid,geom_path[1]) t 
 			group by t.rec_ctid) 
-			update %I.%I t1 set %I=t2.geom from _result t2 where t1.ctid=t2.rec_ctid',
-			schema_name,table_name,geom_name);
+			update %I.%I t1 set transform_geom=t2.geom from _result t2 where t1.ctid=t2.rec_ctid',
+			schema_name,table_name);
 		when 'POLYGON' then
 			execute format('with _result as (					
-			with _polygon_result as (select rec_ctid,geom_path[1] as _path,ST_MakeLine(geom) as geom from _split_result group by rec_ctid,_path)
+			with _polygon_result as (select rec_ctid,geom_path[1] as _path,ST_MakeLine(target_geom) as geom from _split_result group by rec_ctid,_path)
 			select t1.rec_ctid,case when t2.geom is null then ST_MakePolygon(t1.geom) else ST_MakePolygon(t1.geom,t2.geom) end as geom 
 			from (select rec_ctid,geom  from _polygon_result t where t._path=1) t1 left join 
 			(select rec_ctid,array_agg(geom) as geom  from _polygon_result t where t._path!=1 group by rec_ctid) t2 on t1.rec_ctid=t2.rec_ctid) 
-			update %I.%I t1 set %I=t2.geom from _result t2 where t1.ctid=t2.rec_ctid',
-			schema_name,table_name,geom_name);
+			update %I.%I t1 set transform_geom=t2.geom from _result t2 where t1.ctid=t2.rec_ctid',
+			schema_name,table_name);
 		when 'MULTIPOLYGON' then
 			execute format('with _result as (
 			with _Multi_Polygon_result as (
 				with _polygon_result as (select rec_ctid,geom_path[1] as _path1,
-				geom_path[2] as _path2,ST_MakeLine(geom) as geom from _split_result group by rec_ctid,_path1, _path2)
+				geom_path[2] as _path2,ST_MakeLine(target_geom) as geom from _split_result group by rec_ctid,_path1, _path2)
 				select t1.rec_ctid,t1._path1,case when t2.geom is null then ST_MakePolygon(t1.geom) else ST_MakePolygon(t1.geom,t2.geom) end as geom 
 				from (select rec_ctid,_path1,geom  from _polygon_result t where t._path2=1) t1 left join 
 				(select rec_ctid,_path1,array_agg(geom) as geom  from _polygon_result t where t._path2!=1 group by rec_ctid,_path1) t2 
@@ -400,8 +458,8 @@ BEGIN
 			) 
 			select t.rec_ctid,ST_Multi(ST_Union(geom)) as geom from _Multi_Polygon_result t group by t.rec_ctid
 			) 
-			update %I.%I t1 set %I=t2.geom from _result t2 where t1.ctid=t2.rec_ctid',
-			schema_name,table_name,geom_name);
+			update %I.%I t1 set transform_geom=t2.geom from _result t2 where t1.ctid=t2.rec_ctid',
+			schema_name,table_name);
 		else
 			raise notice '不是当前支持的图形类型！';
 			return;
