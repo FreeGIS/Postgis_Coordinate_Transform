@@ -316,7 +316,7 @@ CREATE OR REPLACE FUNCTION FreeGIS_Coordinate_Transform(
 	in schema_name text,--转换表的schema名称
 	in table_name text,--转换表名字
 	in transform_type FreeGIS_coordinate_transform_type--转换类型枚举型。
-) RETURNS void As
+) RETURNS text As
 $BODY$
 DECLARE
 	rec record;
@@ -328,20 +328,20 @@ BEGIN
 	select * from pg_tables where schemaname=schema_name and tablename=table_name into rec;
 	if(rec is null) then
 		raise notice '坐标转换表不存在，可能scheam或tablename输入错误！';
-		return;
+		return 'failed';
 	end if;
 	
 	--检查转换表是否为空间关系表
 	select * from geometry_columns where f_table_name=table_name and f_table_schema=schema_name into rec;
 	if(rec is null) then
 		raise notice '当前转换只支持带geometry类型的空间关系表！';
-		return;
+		return 'failed';
 	end if;
 	
 	--检查图形维度，当前只支持二维。
 	if(rec.coord_dimension!=2) then
 		raise notice '当前转换只支持二维图形坐标！';
-		return;
+		return 'failed';
 	end if;
 	
 	--检查图形坐标系，当前只支持4326坐标系（除将百度墨卡托转百度经纬度除外）
@@ -349,13 +349,13 @@ BEGIN
 		if(rec.srid!=4326) then
 			raise notice '当前转换只支持数据源为WGS84(EPSG:4326)坐标系！';
 			raise notice '其他坐标系建议先自行转换到4326坐标系，然后使用该脚本进行批量坐标纠正！';
-			return;
+			return 'failed';
 		end if;
 	else
 		--百度墨卡托转其他坐标系，转换方式为BD_MKT2WGS，数据源坐标系应当为3857
 		if(rec.srid!=3857) then
 			raise notice '百度墨卡托转其他坐标系，数据源坐标系必须为(EPSG:3857)坐标系！';
-			return;
+			return 'failed';
 		end if;
 	end if;
 
@@ -367,7 +367,7 @@ BEGIN
 	if(geom_type!='POINT' and geom_type!='MULTIPOINT' and geom_type!='LINESTRING' and geom_type!='MULTILINESTRING' AND 
 	geom_type!='POLYGON' and geom_type!='MULTIPOLYGON') then
 		raise notice '当前转换只支持Point,LineString,Polygon,MultiPoint,MultiLineString,MultiPolygon六种基本图形类型！';
-		return;
+		return 'failed';
 	end if;
 	
 	--转换函数名称拼接
@@ -409,16 +409,22 @@ BEGIN
 		) on commit drop;
 	end if;
 	
+	raise notice '正在将图形拆分成点...';
 	--图形字段非空，将其拆分成点，存入临时表
 	execute format('insert into _split_result(rec_ctid,geom_path,source_geom) SELECT ctid,(pt).path,(pt).geom 
 	FROM (SELECT ctid, ST_DumpPoints(%I) AS pt FROM %I.%I where ST_IsEmpty(%I)=false) as dump_points',geom_name,schema_name,table_name,geom_name);
-	
+	raise notice '图形拆分成点完成！';
 	
 	--临时表建立索引
+	raise notice '对拆分成点后的数据集建索引...';
 	create index _split_result_ctid_idx on _split_result using btree(rec_ctid);
+	raise notice '对拆分成点后的数据集建索引完成！';
 	--批量转换，从souce源转到target记录
+	raise notice '对拆分点进行偏移计算...';
 	execute format('update _split_result set target_geom=%s(source_geom)',transform_function_name);
+	raise notice '对拆分点进行偏移计算完成！';
 	
+	raise notice '偏移计算结果拼装原图形...';
 	--转换完成后，拼装还原更改原表
 	case geom_type
 		when 'POINT' then
@@ -462,9 +468,10 @@ BEGIN
 			schema_name,table_name);
 		else
 			raise notice '不是当前支持的图形类型！';
-			return;
-	end case;		
-	return;
+			return 'failed';
+	end case;	
+	raise notice '偏移计算结果拼装原图形完成！';	
+	return 'success';
 END;
 $BODY$
 LANGUAGE 'plpgsql' VOLATILE STRICT;
