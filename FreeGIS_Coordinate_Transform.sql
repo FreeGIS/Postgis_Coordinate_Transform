@@ -323,6 +323,8 @@ DECLARE
 	geom_name text;
 	geom_type text;
 	transform_function_name text;
+	_source_srid int;
+	_target_srid int;
 BEGIN
 	--检查表是否存在
 	select * from pg_tables where schemaname=schema_name and tablename=table_name into rec;
@@ -377,37 +379,26 @@ BEGIN
 	--图形拆分成点，点图形 进行坐标 偏移转换。
 	--转换表新建转换结果字段，对原图形字段拆分，创建临时表存储拆分结果
 	if(transform_type='BDWGS2BDMKT' or transform_type='WGS2BDMKT') then
-		--新增转换结果字段
-		execute format('alter table %I.%I drop column if exists transform_geom',schema_name,table_name);
-		execute format('alter table %I.%I add column transform_geom geometry(%s,3857)',schema_name,table_name,geom_type);
-		create temp table _split_result(
-			rec_ctid tid,
-			geom_path integer[],
-			source_geom geometry(Point,4326),
-			target_geom geometry(Point,3857)
-		) on commit drop;
+		_source_srid:=4326;
+		_target_srid:=3857;
 	elsif(transform_type='BDMKT2BDWGS' or transform_type='BDMKT2WGS') then
-		--新增转换结果字段
-		execute format('alter table %I.%I drop column if exists transform_geom',schema_name,table_name);
-		execute format('alter table %I.%I add column transform_geom geometry(%s,4326)',schema_name,table_name,geom_type);
-		create temp table _split_result(
-			rec_ctid tid,
-			geom_path integer[],
-			source_geom geometry(Point,3857),
-			target_geom geometry(Point,4326)
-		) on commit drop;
+		_source_srid:=3857;
+		_target_srid:=4326;
 	else
-		--新增转换结果字段
-		execute format('alter table %I.%I drop column if exists transform_geom',schema_name,table_name);
-		execute format('alter table %I.%I add column transform_geom geometry(%s,4326)',schema_name,table_name,geom_type);
-		--新建拆分结果表
-		create temp table _split_result(
-			rec_ctid tid,
-			geom_path integer[],
-			source_geom geometry(Point,4326),
-			target_geom geometry(Point,4326)
-		) on commit drop;
+		_source_srid:=4326;
+		_target_srid:=4326;
 	end if;
+	execute format('alter table %I.%I drop column if exists transform_geom',schema_name,table_name);
+	execute format('alter table %I.%I add column transform_geom geometry(%s,%s)',schema_name,table_name,geom_type,_target_srid);
+	execute format('create temp table _split_result(
+		rec_ctid tid,
+		geom_path integer[],
+		source_geom geometry(Point,%s),
+		target_geom geometry(Point,%s)
+	) on commit drop',_source_srid,_target_srid);
+	
+	
+	
 	
 	raise notice '正在将图形拆分成点...';
 	--图形字段非空，将其拆分成点，存入临时表
