@@ -308,11 +308,34 @@ CREATE TYPE FreeGIS_coordinate_transform_type AS ENUM ('BD2GCJ', 'GCJ2BD', 'WGS2
 'BDWGS2BDMKT','BDMKT2BDWGS','WGS2BDMKT','BDMKT2WGS');
 
 
+--对表批量进行坐标转换
+CREATE OR REPLACE FUNCTION FreeGIS_Coordinate_Transform(
+	in schema_name text,--转换表的schema名称
+	in table_name text,--转换表名字
+	in transform_type FreeGIS_coordinate_transform_type--转换类型枚举型。
+) RETURNS text As
+$BODY$
+DECLARE
+	server_version int;
+begin
+    server_version:=current_setting('server_version_num')::int;
+	--11以上版本
+	if(server_version>=110000) then
+		return _FreeGIS_Coordinate_Transform_1(schema_name,table_name,transform_type);
+	--低于11的版本
+	else 
+		return _FreeGIS_Coordinate_Transform_2(schema_name,table_name,transform_type);
+	end if;
+	
+END;
+$BODY$
+LANGUAGE 'plpgsql' VOLATILE STRICT;
+
 
 
 
 --对表批量进行坐标转换
-CREATE OR REPLACE FUNCTION FreeGIS_Coordinate_Transform(
+CREATE OR REPLACE FUNCTION _FreeGIS_Coordinate_Transform_1(
 	in schema_name text,--转换表的schema名称
 	in table_name text,--转换表名字
 	in transform_type FreeGIS_coordinate_transform_type--转换类型枚举型。
@@ -457,6 +480,298 @@ BEGIN
 			) 
 			update %I.%I t1 set transform_geom=t2.geom from _result t2 where t1.ctid=t2.rec_ctid',
 			schema_name,table_name);
+		else
+			raise notice '不是当前支持的图形类型！';
+			return 'failed';
+	end case;	
+	raise notice '偏移计算结果拼装原图形完成！';	
+	return 'success';
+END;
+$BODY$
+LANGUAGE 'plpgsql' VOLATILE STRICT;
+
+
+--对表批量进行坐标转换
+CREATE OR REPLACE FUNCTION _FreeGIS_Coordinate_Transform_2(
+	in schema_name text,--转换表的schema名称
+	in table_name text,--转换表名字
+	in transform_type FreeGIS_coordinate_transform_type--转换类型枚举型。
+) RETURNS text As
+$BODY$
+DECLARE
+	rec record;
+	geom_name text;
+	geom_type text;
+	transform_function_name text;
+	_source_srid int;
+	_target_srid int;
+	beforerec record;
+	_init boolean;
+	_line geometry;
+	_multiline geometry;
+BEGIN
+	--检查表是否存在
+	select * from pg_tables where schemaname=schema_name and tablename=table_name into rec;
+	if(rec is null) then
+		raise notice '坐标转换表不存在，可能scheam或tablename输入错误！';
+		return 'failed';
+	end if;
+	
+	--检查转换表是否为空间关系表
+	select * from geometry_columns where f_table_name=table_name and f_table_schema=schema_name into rec;
+	if(rec is null) then
+		raise notice '当前转换只支持带geometry类型的空间关系表！';
+		return 'failed';
+	end if;
+	
+	--检查图形维度，当前只支持二维。
+	if(rec.coord_dimension!=2) then
+		raise notice '当前转换只支持二维图形坐标！';
+		return 'failed';
+	end if;
+	
+	--检查图形坐标系，当前只支持4326坐标系（除将百度墨卡托转百度经纬度除外）
+	if(transform_type!='BDMKT2BDWGS' and transform_type!='BDMKT2WGS') then
+		if(rec.srid!=4326) then
+			raise notice '当前转换只支持数据源为WGS84(EPSG:4326)坐标系！';
+			raise notice '其他坐标系建议先自行转换到4326坐标系，然后使用该脚本进行批量坐标纠正！';
+			return 'failed';
+		end if;
+	else
+		--百度墨卡托转其他坐标系，转换方式为BD_MKT2WGS，数据源坐标系应当为3857
+		if(rec.srid!=3857) then
+			raise notice '百度墨卡托转其他坐标系，数据源坐标系必须为(EPSG:3857)坐标系！';
+			return 'failed';
+		end if;
+	end if;
+
+	geom_type:=rec.type;
+	geom_name:=rec.f_geometry_column;
+	
+	--检查图形类型，仅仅支持Point,LineString,Polygon,MultiPoint,MultiLineString,MultiPolygon六种明确类型。
+	--类似geometry或者collection类型，由于指定不明确，不太好进行规律转化。
+	if(geom_type!='POINT' and geom_type!='MULTIPOINT' and geom_type!='LINESTRING' and geom_type!='MULTILINESTRING' AND 
+	geom_type!='POLYGON' and geom_type!='MULTIPOLYGON') then
+		raise notice '当前转换只支持Point,LineString,Polygon,MultiPoint,MultiLineString,MultiPolygon六种基本图形类型！';
+		return 'failed';
+	end if;
+	
+	--转换函数名称拼接
+	transform_function_name:='FreeGIS_'||transform_type;
+	
+	
+	--图形拆分成点，点图形 进行坐标 偏移转换。
+	--转换表新建转换结果字段，对原图形字段拆分，创建临时表存储拆分结果
+	if(transform_type='BDWGS2BDMKT' or transform_type='WGS2BDMKT') then
+		_source_srid:=4326;
+		_target_srid:=3857;
+	elsif(transform_type='BDMKT2BDWGS' or transform_type='BDMKT2WGS') then
+		_source_srid:=3857;
+		_target_srid:=4326;
+	else
+		_source_srid:=4326;
+		_target_srid:=4326;
+	end if;
+	execute format('alter table %I.%I drop column if exists transform_geom',schema_name,table_name);
+	execute format('alter table %I.%I add column transform_geom geometry(%s,%s)',schema_name,table_name,geom_type,_target_srid);
+	execute format('create temp table _split_result(
+		rec_ctid tid,
+		geom_path integer[],
+		source_geom geometry(Point,%s),
+		target_geom geometry(Point,%s)
+	) on commit drop',_source_srid,_target_srid);
+	
+	raise notice '正在将图形拆分成点...';
+	--图形字段非空，将其拆分成点，存入临时表
+	execute format('insert into _split_result(rec_ctid,geom_path,source_geom) SELECT ctid,(pt).path,(pt).geom 
+	FROM (SELECT ctid, ST_DumpPoints(%I) AS pt FROM %I.%I where ST_IsEmpty(%I)=false) as dump_points',geom_name,schema_name,table_name,geom_name);
+	raise notice '图形拆分成点完成！';
+	
+	--临时表建立索引
+	raise notice '对拆分成点后的数据集建索引...';
+	create index _split_result_ctid_idx on _split_result using btree(rec_ctid);
+	raise notice '对拆分成点后的数据集建索引完成！';
+	--批量转换，从souce源转到target记录
+	raise notice '对拆分点进行偏移计算...';
+	execute format('update _split_result set target_geom=%s(source_geom)',transform_function_name);
+	raise notice '对拆分点进行偏移计算完成！';
+	
+	raise notice '偏移计算结果拼装原图形...';
+
+	--转换完成后，拼装还原更改原表
+	case geom_type
+		when 'POINT' then
+			execute format('update %I.%I t1 set transform_geom=t2.target_geom from _split_result t2 where t1.ctid=t2.rec_ctid',
+			schema_name,table_name);
+		when 'MULTIPOINT' then
+			execute format('with _result as (select rec_ctid,ST_Multi(ST_Union(target_geom)) as geom from _split_result group by rec_ctid) 
+			update %I.%I t1 set transform_geom=t2.geom from _result t2 where t1.ctid=t2.rec_ctid',
+			schema_name,table_name);
+		when 'LINESTRING' then
+			_init:=true;
+			for rec in select * from _split_result order by rec_ctid,geom_path loop
+				if(_init=true) then
+					beforerec:=rec;
+					_init:=false;
+					continue;
+				end if;
+				
+				if(beforerec.rec_ctid!=rec.rec_ctid) then
+					execute format('update %I.%I set transform_geom=$1 where ctid=$2',schema_name,table_name) using _line,beforerec.rec_ctid;
+				--之前与之后的记录，同属一个rec_ctid
+				else
+					if(rec.geom_path[1]=2) then
+						_line=ST_MakeLine(beforerec.target_geom,rec.target_geom);
+					else
+						_line:=ST_AddPoint(_line,rec.target_geom);
+					end if;
+				end if;
+				beforerec:=rec;
+			end loop;
+			execute format('update %I.%I set transform_geom=$1 where ctid=$2',schema_name,table_name) using _line,beforerec.rec_ctid;
+		when 'MULTILINESTRING' then
+			execute format('create temp table temp_linestring(
+				gid serial,
+				rec_ctid tid,
+				line geometry(LineString,%s)
+			) on commit drop',_target_srid);
+			--建立索引
+			create index temp_linestring_ctid_idx on temp_linestring using btree(rec_ctid);
+		
+			_init:=true;
+			for rec in select * from _split_result order by rec_ctid,geom_path loop
+				if(_init=true) then
+					beforerec:=rec;
+					_init:=false;
+					continue;
+				end if;
+				--如果 记录数 或者 图形序号 不一致
+				if(beforerec.rec_ctid!=rec.rec_ctid or beforerec.geom_path[1]!=rec.geom_path[1]) then
+					execute format('insert into  temp_linestring(rec_ctid,line) values($1,$2)') using beforerec.rec_ctid,_line;
+				--之前与之后的记录，同属一个rec_ctid
+				else
+					if(rec.geom_path[2]=2) then
+						_line=ST_MakeLine(beforerec.target_geom,rec.target_geom);
+					else
+						_line:=ST_AddPoint(_line,rec.target_geom);
+					end if;
+				end if;
+				beforerec:=rec;
+			end loop;
+			execute format('insert into  temp_linestring(rec_ctid,line) values($1,$2)') using beforerec.rec_ctid,_line;
+			--对临时linestring表聚合成Multilingstring
+			execute format('update %I.%I t1 set transform_geom=t2.geom from (select rec_ctid,ST_Multi(ST_Union(line)) as geom from  temp_linestring group by rec_ctid) t2 where t1.ctid=t2.rec_ctid',schema_name,table_name);
+		when 'POLYGON' then
+			--isoutlinestring为true代表外环，false是内环
+			execute format('create temp table temp_outerlinestring(
+				rec_ctid tid,
+				line geometry(LineString,%s)
+			) on commit drop',_target_srid);
+			--建立索引
+			create index temp_outerlinestring_ctid_idx on temp_outerlinestring using btree(rec_ctid);
+			
+			execute format('create temp table temp_interiorlinestrings(
+				rec_ctid tid,
+				line geometry(LineString,%s)
+			) on commit drop',_target_srid);
+			--建立索引
+			create index temp_interiorlinestrings_ctid_idx on temp_interiorlinestrings using btree(rec_ctid);
+			_init:=true;
+			for rec in select * from _split_result order by rec_ctid,geom_path loop
+				if(_init=true) then
+					beforerec:=rec;
+					_init:=false;
+					continue;
+				end if;
+				--如果 记录数 或者 图形序号 不一致
+				if(beforerec.rec_ctid!=rec.rec_ctid or beforerec.geom_path[1]!=rec.geom_path[1]) then
+					--=1是外环
+					if(beforerec.geom_path[1]=1) then
+						execute format('insert into temp_outerlinestring(rec_ctid,line) values($1,$2)') using beforerec.rec_ctid,_line;
+					else
+						execute format('insert into temp_interiorlinestrings(rec_ctid,line) values($1,$2)') using beforerec.rec_ctid,_line;
+					end if;
+				--之前与之后的记录，同属一个rec_ctid
+				else
+					if(rec.geom_path[2]=2) then
+						_line=ST_MakeLine(beforerec.target_geom,rec.target_geom);
+					else
+						_line:=ST_AddPoint(_line,rec.target_geom);
+					end if;
+				end if;
+				beforerec:=rec;
+			end loop;
+			--=1是外环
+			if(beforerec.geom_path[1]=1) then
+				execute format('insert into temp_outerlinestring(rec_ctid,line) values($1,$2)') using beforerec.rec_ctid,_line;
+			else
+				execute format('insert into temp_interiorlinestrings(rec_ctid,line) values($1,$2)') using beforerec.rec_ctid,_line;
+			end if;
+			--对临时linestring表聚合成Polygon
+			execute format('update %I.%I t1 set transform_geom=case when t2.interiorlinestrings is null then ST_MakePolygon(t2.outerlinestring) else ST_MakePolygon(t2.outerlinestring,t2.interiorlinestrings) 
+			end from (select t1.rec_ctid,t1.line as outerlinestring,t2.interiorlinestrings from temp_outerlinestring t1 left join (select rec_ctid,array_agg(line) as interiorlinestrings from temp_interiorlinestrings group by rec_ctid) t2 
+			on t1.rec_ctid=t2.rec_ctid) t2 where t1.ctid=t2.rec_ctid',schema_name,table_name);
+		when 'MULTIPOLYGON' then
+			--isoutlinestring为true代表外环，false是内环
+			execute format('create temp table temp_outerlinestring(
+				rec_ctid tid,
+				polygon_idx int,
+				line geometry(LineString,%s)
+			) on commit drop',_target_srid);
+			--建立索引
+			create index temp_outerlinestring_ctid_idx on temp_outerlinestring using btree(rec_ctid);
+			
+			execute format('create temp table temp_interiorlinestrings(
+				rec_ctid tid,
+				polygon_idx int,
+				line geometry(LineString,%s)
+			) on commit drop',_target_srid);
+			--建立索引
+			create index temp_interiorlinestrings_ctid_idx on temp_interiorlinestrings using btree(rec_ctid);
+			execute format('create temp table temp_polygons(
+				rec_ctid tid,
+				polygon geometry(POLYGON,%s)
+			) on commit drop',_target_srid);
+			--建立索引
+			create index temp_polygons_ctid_idx on temp_polygons using btree(rec_ctid);
+			_init:=true;
+			for rec in select * from _split_result order by rec_ctid,geom_path loop
+				if(_init=true) then
+					beforerec:=rec;
+					_init:=false;
+					continue;
+				end if;
+				--如果 记录数 或者 图形序号 不一致
+				if(beforerec.rec_ctid!=rec.rec_ctid or beforerec.geom_path[1]!=rec.geom_path[1] or beforerec.geom_path[2]!=rec.geom_path[2]) then
+					--=1是外环
+					if(beforerec.geom_path[2]=1) then
+						execute format('insert into temp_outerlinestring(rec_ctid,polygon_idx,line) values($1,$2,$3)') using beforerec.rec_ctid,beforerec.geom_path[2],_line;
+					else
+						execute format('insert into temp_interiorlinestrings(rec_ctid,polygon_idx,line) values($1,$2,$3)') using beforerec.rec_ctid,beforerec.geom_path[2],_line;
+					end if;
+				--之前与之后的记录，同属一个rec_ctid
+				else
+					if(rec.geom_path[3]=2) then
+						_line=ST_MakeLine(beforerec.target_geom,rec.target_geom);
+					else
+						_line:=ST_AddPoint(_line,rec.target_geom);
+					end if;
+				end if;
+				beforerec:=rec;
+			end loop;
+			--=1是外环
+			if(beforerec.geom_path[2]=1) then
+				execute format('insert into temp_outerlinestring(rec_ctid,polygon_idx,line) values($1,$2,$3)') using beforerec.rec_ctid,beforerec.geom_path[2],_line;
+			else
+				execute format('insert into temp_interiorlinestrings(rec_ctid,polygon_idx,line) values($1,$2,$3)') using beforerec.rec_ctid,beforerec.geom_path[2],_line;
+			end if;
+			--写入临时 polygon表
+			insert into  temp_polygons(rec_ctid,polygon) select t1.rec_ctid,ST_Multi(geom) from (select t.rec_ctid,case when t.interiorlinestrings is null then ST_MakePolygon(t.outerlinestring) else ST_MakePolygon(t.outerlinestring,t.interiorlinestrings) 
+			end as geom from (select t1.rec_ctid,t1.line as outerlinestring,t2.interiorlinestrings from temp_outerlinestring t1 left join (select rec_ctid,array_agg(line) as interiorlinestrings from temp_interiorlinestrings 
+			group by rec_ctid) t2 on t1.rec_ctid=t2.rec_ctid) t) t1 group by t1.rec_ctid;
+			
+			--对临时linestring表聚合成MultiPolygon
+			execute format('update %I.%I t1 set transform_geom=ST_Multi(t2.polygon) from temp_polygons t2 where t1.ctid=t2.rec_ctid',schema_name,table_name);
 		else
 			raise notice '不是当前支持的图形类型！';
 			return 'failed';
