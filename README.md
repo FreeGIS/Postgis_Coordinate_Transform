@@ -26,7 +26,6 @@ https://github.com/FreeGIS/Postgis_Coordinate_Transform
 * 支持对整个表批处理转换。
 
 约束：
-* 实际测试本脚本在PG11+PostGIS2.5环境下有效，9.5,9.6因ST_MakeLine函数在数据量大的时候容易乱线，请暂时不用使用该脚本。
 * 要求转换的表是基于PostGIS创建的空间关系表
 示例支持的表：
 ```
