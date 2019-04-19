@@ -730,7 +730,7 @@ BEGIN
 			create index temp_interiorlinestrings_ctid_idx on temp_interiorlinestrings using btree(rec_ctid);
 			execute format('create temp table temp_polygons(
 				rec_ctid tid,
-				polygon geometry(POLYGON,%s)
+				polygon geometry(MultiPOLYGON,%s)
 			) on commit drop',_target_srid);
 			--建立索引
 			create index temp_polygons_ctid_idx on temp_polygons using btree(rec_ctid);
@@ -766,12 +766,18 @@ BEGIN
 				execute format('insert into temp_interiorlinestrings(rec_ctid,polygon_idx,line) values($1,$2,$3)') using beforerec.rec_ctid,beforerec.geom_path[2],_line;
 			end if;
 			--写入临时 polygon表
-			insert into  temp_polygons(rec_ctid,polygon) select t1.rec_ctid,ST_Multi(geom) from (select t.rec_ctid,case when t.interiorlinestrings is null then ST_MakePolygon(t.outerlinestring) else ST_MakePolygon(t.outerlinestring,t.interiorlinestrings) 
-			end as geom from (select t1.rec_ctid,t1.line as outerlinestring,t2.interiorlinestrings from temp_outerlinestring t1 left join (select rec_ctid,array_agg(line) as interiorlinestrings from temp_interiorlinestrings 
-			group by rec_ctid) t2 on t1.rec_ctid=t2.rec_ctid) t) t1 group by t1.rec_ctid;
+			insert into  temp_polygons(rec_ctid,polygon) select t1.rec_ctid,ST_Multi(ST_Union(t1.geom)) from 
+			(
+			select t.rec_ctid,case when t.interiorlinestrings is null then ST_MakePolygon(t.outerlinestring) else ST_MakePolygon(t.outerlinestring,t.interiorlinestrings) 
+			end as geom from 
+			(select t1.rec_ctid,t1.line as outerlinestring,t2.interiorlinestrings from temp_outerlinestring t1 
+				left join (select rec_ctid,array_agg(line) as interiorlinestrings from temp_interiorlinestrings group by rec_ctid) t2 
+				on t1.rec_ctid=t2.rec_ctid) t
+			) t1 
+			group by t1.rec_ctid;
 			
 			--对临时linestring表聚合成MultiPolygon
-			execute format('update %I.%I t1 set transform_geom=ST_Multi(t2.polygon) from temp_polygons t2 where t1.ctid=t2.rec_ctid',schema_name,table_name);
+			execute format('update %I.%I t1 set transform_geom=t2.polygon from temp_polygons t2 where t1.ctid=t2.rec_ctid',schema_name,table_name);
 		else
 			raise notice '不是当前支持的图形类型！';
 			return 'failed';
