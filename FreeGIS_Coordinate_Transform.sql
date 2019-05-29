@@ -113,7 +113,7 @@ DECLARE
 	d_lon double precision;
 	d_lat double precision;
 BEGIN
-	_gcj_point:=WGS2GCJ(gcj_point);
+	_gcj_point:=FreeGIS_WGS2GCJ(gcj_point);
 	
 	gcj_lon:=ST_X(gcj_point);
 	gcj_lat:=ST_Y(gcj_point);
